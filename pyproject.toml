@@ -6,6 +6,8 @@ build-backend = "setuptools.build_meta"
 name = "video-digest"
 version = "0.1.0"
 description = "Turn a video (URL or local mp4) into keyframes + transcript + a structured markdown digest. Fully local, $0."
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = [
     "yt-dlp",

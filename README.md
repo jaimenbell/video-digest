@@ -31,11 +31,21 @@ the frames and writing the visual notes / ideas / action items is a human or
 Claude-in-the-loop step, done after the pipeline runs (Claude is the part of
 this workflow that can actually see the images).
 
+## Requirements
+
+- Python 3.10+
+- `ffmpeg` + `ffprobe` on `PATH` (this repo was built/tested against ffmpeg 8.1.1)
+  - Windows: `winget install Gyan.FFmpeg` (or grab a build from gyan.dev) and add
+    its `bin/` to `PATH`
+  - macOS: `brew install ffmpeg`
+  - Linux: `apt install ffmpeg` / your distro's package manager
+- The Python packages in `requirements.txt` (`yt-dlp`, `faster-whisper`,
+  `requests`)
+
 ## Quickstart
 
 ```bash
 pip install -r requirements.txt   # yt-dlp, faster-whisper, requests
-# ffmpeg must already be on PATH (this repo was built against ffmpeg 8.1.1)
 
 # From a URL:
 python -m video_digest "https://www.tiktok.com/@user/video/123"
@@ -89,11 +99,12 @@ pip install pytest
 pytest
 ```
 
-Every subprocess call (`yt-dlp`, `ffmpeg`, `ffprobe`) and every model/HTTP call
-(`faster-whisper`'s `WhisperModel`, the local vLLM request) is dependency-
-injected behind a `runner=subprocess.run` / `model_factory=` / `http_post=`
-default argument. The test suite mocks all of these — it never invokes a real
-binary, loads a real Whisper model, or makes a real network request.
+68 tests, 68 passing (re-verified fresh before publish). Every subprocess call
+(`yt-dlp`, `ffmpeg`, `ffprobe`) and every model/HTTP call (`faster-whisper`'s
+`WhisperModel`, the local vLLM request) is dependency-injected behind a
+`runner=subprocess.run` / `model_factory=` / `http_post=` default argument.
+The test suite mocks all of these — it never invokes a real binary, loads a
+real Whisper model, or makes a real network request.
 
 ## Project layout
 
@@ -119,3 +130,23 @@ a video becomes something Claude — or a human — can actually work with: pull
 design references out of a UI walkthrough, pull ideas out of a talk, teardown
 a competitor's demo. Standalone repo, no cloud dependency, no video leaves
 your machine except to be fetched from wherever you pointed `yt-dlp` at.
+
+## Limitations
+
+- Developed and tested on Windows; `ffmpeg`/`ffprobe` invocation uses
+  subprocess args that should be POSIX-compatible but have not been verified
+  on macOS/Linux.
+- The optional vLLM summary step requires you to already have a local vLLM
+  (or OpenAI-compatible) server running at the configured endpoint — this
+  repo doesn't set one up for you, and the pipeline works fine without it
+  (falls back to a `TODO` placeholder).
+- `faster-whisper` model download/inference speed and accuracy depend on the
+  `--model` size you pick (`tiny`..`large-v3`) and your CPU/GPU.
+- Scene-change keyframe detection is a heuristic (ffmpeg's `scene` filter +
+  a floor interval); it won't perfectly match every video's actual cut
+  points, especially on long or slow-paced source material.
+- No packaging/publish to PyPI yet — install from source.
+
+## License
+
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Jaime Bell.

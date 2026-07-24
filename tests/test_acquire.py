@@ -23,8 +23,8 @@ class TestIsUrl:
     @pytest.mark.parametrize(
         "source",
         [
-            "C:\\Users\\jaime\\Downloads\\video.mp4",
-            "/home/jaime/video.mp4",
+            "C:\\Users\\alice\\Downloads\\video.mp4",
+            "/home/alice/video.mp4",
             "video.mp4",
             "./scratch/source.mp4",
         ],

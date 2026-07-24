@@ -26,7 +26,7 @@ class TestSlugify:
 
 class TestTitleFromSource:
     def test_local_path_uses_stem(self):
-        assert title_from_source("/home/jaime/clips/demo.mp4") == "demo"
+        assert title_from_source("/home/alice/clips/demo.mp4") == "demo"
 
     def test_url_falls_back_to_stem_or_source(self):
         # Path(...).stem on a URL without an extension just returns the last segment.
