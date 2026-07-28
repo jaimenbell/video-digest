@@ -1,3 +1,5 @@
 yt-dlp
 faster-whisper
 requests
+pillow
+numpy

@@ -13,6 +13,13 @@ dependencies = [
     "yt-dlp",
     "faster-whisper",
     "requests",
+    # Keyframe colour analysis (video_digest/visual.py). Pillow decodes the JPEGs
+    # ffmpeg writes; numpy does the palette/histogram math. Both are local-only and
+    # model-free, so the "$0, fully local" guarantee is unchanged. numpy is already
+    # pulled in transitively by faster-whisper -> ctranslate2, but this module
+    # imports it directly, so it is declared directly.
+    "pillow",
+    "numpy",
 ]
 
 [project.optional-dependencies]

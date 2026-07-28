@@ -6,6 +6,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from video_digest.cli import build_arg_parser, run_pipeline, slugify, title_from_source
+from video_digest.visual import FrameVisual, VideoVisual
 
 
 class TestSlugify:
@@ -61,6 +62,11 @@ class TestBuildArgParser:
         assert args.model == "small"
         assert args.vault_inbox == "C:/vault/inbox"
         assert args.no_vllm_summary is True
+
+    def test_visual_analysis_is_on_by_default_and_opt_outable(self):
+        parser = build_arg_parser()
+        assert parser.parse_args(["v.mp4"]).no_visual is False
+        assert parser.parse_args(["v.mp4", "--no-visual"]).no_visual is True
 
 
 class TestRunPipelineFullyMocked:
@@ -143,6 +149,57 @@ class TestRunPipelineFullyMocked:
             **fakes,
         )
         fakes["summarize_fn"].assert_not_called()
+
+    def test_visual_analysis_runs_over_the_extracted_frames(self, tmp_path):
+        fakes = self._fakes(tmp_path)
+        frames = fakes["extract_frames_fn"].return_value
+        fake_visual = FrameVisual(index=1, path=str(frames[0]), ok=False, error="stubbed")
+        analyze_frames_fn = MagicMock(return_value=[fake_visual])
+        summarize_visuals_fn = MagicMock(
+            return_value=VideoVisual(analyzed_count=0, failed_count=1)
+        )
+
+        run_pipeline(
+            source="clip.mp4",
+            output_dir=tmp_path / "digests",
+            scratch_dir=tmp_path / "scratch",
+            analyze_frames_fn=analyze_frames_fn,
+            summarize_visuals_fn=summarize_visuals_fn,
+            **fakes,
+        )
+        analyze_frames_fn.assert_called_once_with(frames)
+        summarize_visuals_fn.assert_called_once_with([fake_visual])
+
+    def test_skips_visual_analysis_when_disabled(self, tmp_path):
+        fakes = self._fakes(tmp_path)
+        analyze_frames_fn = MagicMock(return_value=[])
+        summarize_visuals_fn = MagicMock()
+
+        run_pipeline(
+            source="clip.mp4",
+            output_dir=tmp_path / "digests",
+            scratch_dir=tmp_path / "scratch",
+            use_visual_analysis=False,
+            analyze_frames_fn=analyze_frames_fn,
+            summarize_visuals_fn=summarize_visuals_fn,
+            **fakes,
+        )
+        analyze_frames_fn.assert_not_called()
+        summarize_visuals_fn.assert_not_called()
+
+    def test_unreadable_frames_do_not_break_the_pipeline(self, tmp_path):
+        # The mocked frame path does not exist on disk; the real visual stage must
+        # report that honestly and still produce a digest.
+        fakes = self._fakes(tmp_path)
+        digest_path = run_pipeline(
+            source="clip.mp4",
+            output_dir=tmp_path / "digests",
+            scratch_dir=tmp_path / "scratch",
+            **fakes,
+        )
+        content = digest_path.read_text(encoding="utf-8")
+        assert "FRAME UNREADABLE" in content
+        assert "## Visual roll-up" in content
 
     def test_no_real_subprocess_or_network_calls(self, tmp_path):
         # Every stage is a MagicMock; nothing here can hit a real binary or network.
