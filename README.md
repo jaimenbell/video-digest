@@ -18,18 +18,54 @@ input: a video URL (yt-dlp) OR a local mp4 path
                  -> scratch/frames/NNN.jpg
  3. audio     -> ffmpeg extract mono 16kHz wav -> scratch/audio.wav
  4. transcript-> faster-whisper (local, $0) -> scratch/transcript.txt (timestamped)
- 5. digest    -> assemble markdown: Summary / Visual notes per keyframe /
-                 Ideas to steal / Action items / Full transcript (folded)
+ 5. visual    -> deterministic, model-free colour analysis of every keyframe:
+                 k-means palette (hex + coverage), luminance histogram /
+                 substrate darkness, saturation distribution, bright-mark
+                 (emissive) density, plus a whole-video roll-up + outlier frames
+ 6. digest    -> assemble markdown: Summary / Visual notes per keyframe /
+                 Visual roll-up / Ideas to steal / Action items /
+                 Full transcript (folded)
                  optional first-pass mechanical Summary from a local vLLM
                  server (text-only — vLLM never sees the keyframe images)
 output: digests/video-digest-YYYY-MM-DD-<slug>.md
 ```
 
-The digest-assembly step does **not** perform visual synthesis itself — it
-assembles a template with a TODO placeholder per keyframe. Actually looking at
-the frames and writing the visual notes / ideas / action items is a human or
-Claude-in-the-loop step, done after the pipeline runs (Claude is the part of
-this workflow that can actually see the images).
+### What the visual stage does (and deliberately does not) do
+
+Stage 5 **measures** the frames; it never describes them. For an art-direction
+reference that is the useful half: `#232c28` at 37% coverage is a fact you can
+paste into a palette, reproducible bit-for-bit, produced offline at $0 — whereas
+prose like "dark, moody, neon accents" is unverifiable and, from a model that
+cannot see, would be fabricated. Concretely, per frame:
+
+| Measure | What it answers |
+|---|---|
+| k-means palette (top-N hex + coverage %) | what colours are actually on screen, and how much of the frame each one owns |
+| substrate hex + luma + % below luma 32 | "is the background truly black, or dark gray?" — as a number, not a vibe |
+| mean/median luma | overall exposure of the frame |
+| mean saturation + vivid fraction (S>=0.50) | how "vibrant" the frame really is |
+| bright-mark density (% of pixels >= luma 200) | emissive density — how many small glowing marks per unit area |
+
+The roll-up clusters every frame's swatches into one whole-video palette and
+flags outlier frames by z-score, so distinct scenes/districts surface on their
+own.
+
+Everything is deterministic: k-means is seeded, pixel subsampling is a fixed
+stride (never a random draw), and swatches are totally ordered. The same frames
+always produce the same hex values — `tests/test_visual.py` pins this.
+
+A missing or corrupt frame is **reported** in the digest (`FRAME UNREADABLE`,
+with the error, keeping its TODO line). It is never silently skipped and its
+numbers are never invented.
+
+`video_digest/visual.py` also exposes an **optional-VLM seam**
+(`analyze_frames(..., describe_fn=...)`) for a future vision model, but nothing
+in this repo wires one up: the local vLLM this pipeline talks to (`qwen3-14b`)
+is text-only and cannot describe an image, and adding a VLM would be an
+architecture decision, not a default. Writing the *interpretation* — visual
+notes prose, ideas to steal, action items — is still a human or
+Claude-in-the-loop step after the pipeline runs (Claude is the part of this
+workflow that can actually see the images).
 
 ## Requirements
 
@@ -40,12 +76,13 @@ this workflow that can actually see the images).
   - macOS: `brew install ffmpeg`
   - Linux: `apt install ffmpeg` / your distro's package manager
 - The Python packages in `requirements.txt` (`yt-dlp`, `faster-whisper`,
-  `requests`)
+  `requests`, `pillow`, `numpy` — the last two are used only by the local,
+  model-free keyframe colour analysis)
 
 ## Quickstart
 
 ```bash
-pip install -r requirements.txt   # yt-dlp, faster-whisper, requests
+pip install -r requirements.txt   # yt-dlp, faster-whisper, requests, pillow, numpy
 
 # From a URL:
 python -m video_digest "https://www.tiktok.com/@user/video/123"
@@ -59,7 +96,8 @@ python -m video_digest <url-or-path> \
   --scratch scratch/ \
   --model base \
   --vault-inbox "C:/path/to/your/obsidian/vault/inbox" \
-  --no-vllm-summary
+  --no-vllm-summary \
+  --no-visual
 ```
 
 - `--output` — where the digest markdown lands (default `digests/`, gitignored).
@@ -76,6 +114,9 @@ python -m video_digest <url-or-path> \
   (vLLM never sees the keyframe images — that part is Claude/human-only). If
   the server isn't reachable, the pipeline falls back to the placeholder
   automatically — this is never a hard dependency.
+- `--no-visual` — skip the deterministic keyframe colour analysis and leave the
+  per-frame `TODO` placeholders instead. The analysis runs by default: it is
+  local, model-free, and costs nothing but a second or two of CPU.
 
 ## After a run
 
@@ -84,7 +125,8 @@ The digest markdown at `digests/video-digest-<date>-<slug>.md` references
 fill in:
 
 - **Summary** (if not already filled by the optional vLLM first pass)
-- **Visual notes** — one line per keyframe range describing what's on screen
+- **Visual notes** — the measured colour data is already filled in per keyframe
+  (palette, substrate, saturation, bright-mark density); add what's *on screen*
 - **Ideas to steal**
 - **Action items**
 
@@ -99,12 +141,15 @@ pip install pytest
 pytest
 ```
 
-68 tests, 68 passing (re-verified fresh before publish). Every subprocess call
+126 tests, 126 passing (re-verified fresh). Every subprocess call
 (`yt-dlp`, `ffmpeg`, `ffprobe`) and every model/HTTP call (`faster-whisper`'s
 `WhisperModel`, the local vLLM request) is dependency-injected behind a
 `runner=subprocess.run` / `model_factory=` / `http_post=` default argument.
 The test suite mocks all of these — it never invokes a real binary, loads a
-real Whisper model, or makes a real network request.
+real Whisper model, or makes a real network request. The keyframe colour tests
+synthesise their own lossless PNGs in `tmp_path` (exact pixel values, no JPEG
+rounding), so they need no sample video and pin the k-means output to literal
+hex values.
 
 ## Project layout
 
@@ -115,7 +160,8 @@ video_digest/
   audio.py         # ffmpeg mono 16kHz wav extraction
   transcript.py    # faster-whisper transcription + timestamp formatting
   vllm_summary.py  # optional local-vLLM text-only first-pass summary
-  digest.py        # pure markdown template assembly (no visual synthesis)
+  visual.py        # deterministic, model-free keyframe colour analysis (palette/luma/sat/density)
+  digest.py        # pure markdown template assembly (renders measurements, never invents prose)
   cli.py           # argparse entry point + pipeline orchestration
 tests/             # unit tests, one file per module, subprocess/model/HTTP all mocked
 scratch/           # gitignored working directory (video, frames, audio, transcript)
@@ -145,6 +191,12 @@ your machine except to be fetched from wherever you pointed `yt-dlp` at.
 - Scene-change keyframe detection is a heuristic (ffmpeg's `scene` filter +
   a floor interval); it won't perfectly match every video's actual cut
   points, especially on long or slow-paced source material.
+- The visual stage measures colour; it does not recognise objects, read on-screen
+  text, or describe composition. That is deliberate (see above) — no vision model
+  is wired up, only a seam for one.
+- Palette k-means samples up to 20k pixels per frame and statistics up to 1M
+  pixels (fixed stride, deterministic). Very fine detail below that sampling
+  density can be missed.
 - No packaging/publish to PyPI yet — install from source.
 
 ## License

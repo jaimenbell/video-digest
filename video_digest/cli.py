@@ -1,6 +1,7 @@
 """CLI entry point + pipeline orchestration.
 
-    python -m video_digest <url-or-path> [--output digests/] [--model base] [--vault-inbox <path>]
+    python -m video_digest <url-or-path> [--output digests/] [--model base]
+                           [--vault-inbox <path>] [--no-vllm-summary] [--no-visual]
 
 Every stage function is injected as a keyword argument to `run_pipeline` so the
 whole pipeline is testable without a real yt-dlp/ffmpeg/faster-whisper/vLLM call.
@@ -27,6 +28,7 @@ from .keyframes import (
     select_keyframe_timestamps,
 )
 from .transcript import transcribe_audio
+from .visual import analyze_frames, summarize_visuals
 from .vllm_summary import summarize_with_vllm
 
 DEFAULT_SCRATCH_DIR = Path("scratch")
@@ -53,6 +55,7 @@ def run_pipeline(
     model_size: str = "base",
     vault_inbox: Path | None = None,
     use_vllm_summary: bool = True,
+    use_visual_analysis: bool = True,
     acquire_fn=acquire_video,
     probe_duration_fn=probe_duration,
     detect_scenes_fn=detect_scene_changes,
@@ -60,6 +63,8 @@ def run_pipeline(
     extract_audio_fn=extract_audio,
     transcribe_fn=transcribe_audio,
     summarize_fn=summarize_with_vllm,
+    analyze_frames_fn=analyze_frames,
+    summarize_visuals_fn=summarize_visuals,
 ) -> Path:
     """Run the full acquire -> keyframes -> audio -> transcript -> digest pipeline.
 
@@ -94,6 +99,12 @@ def run_pipeline(
     if use_vllm_summary:
         summary_text = summarize_fn(transcript_text)
 
+    frame_visuals = None
+    visual_rollup = None
+    if use_visual_analysis:
+        frame_visuals = analyze_frames_fn(frame_paths)
+        visual_rollup = summarize_visuals_fn(frame_visuals)
+
     title = title_from_source(source)
     digest_md = assemble_digest(
         title=title,
@@ -102,6 +113,8 @@ def run_pipeline(
         transcript_text=transcript_text,
         frame_timestamps=timestamps,
         summary_text=summary_text,
+        frame_visuals=frame_visuals,
+        visual_rollup=visual_rollup,
     )
 
     today = date_cls.today().isoformat()
@@ -148,6 +161,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip the local vLLM first-pass text summary; leave a TODO placeholder instead",
     )
+    parser.add_argument(
+        "--no-visual",
+        action="store_true",
+        help=(
+            "Skip the deterministic keyframe colour analysis (palette/luminance/"
+            "saturation/bright-mark density); leave TODO placeholders instead"
+        ),
+    )
     return parser
 
 
@@ -162,6 +183,7 @@ def main(argv: list[str] | None = None) -> int:
         model_size=args.model,
         vault_inbox=Path(args.vault_inbox) if args.vault_inbox else None,
         use_vllm_summary=not args.no_vllm_summary,
+        use_visual_analysis=not args.no_visual,
     )
     print(f"Digest written: {digest_path}")
     return 0
