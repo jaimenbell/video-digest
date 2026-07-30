@@ -1,5 +1,5 @@
-yt-dlp
-faster-whisper
-requests
-pillow
-numpy
+yt-dlp==2026.7.4
+faster-whisper==1.2.1
+requests==2.34.2
+pillow==12.3.0
+numpy==2.5.1
