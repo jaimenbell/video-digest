@@ -22,6 +22,9 @@ dependencies = [
     "numpy",
 ]
 
+[project.urls]
+Homepage = "https://jaimenbell.dev"
+
 [project.optional-dependencies]
 dev = ["pytest"]
 

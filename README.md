@@ -201,4 +201,10 @@ your machine except to be fetched from wherever you pointed `yt-dlp` at.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Jaime Bell.
+MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Jaimen Bell.
+
+## Commercial support
+
+Maintained by [Jaimen Bell](https://jaimenbell.dev). For custom local-first
+tooling or agent-workflow automation work, see
+[jaimenbell.dev](https://jaimenbell.dev).
