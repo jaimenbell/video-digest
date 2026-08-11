@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "video-digest"
+name = "jaimenbell-video-digest"
 version = "0.1.0"
 description = "Turn a video (URL or local mp4) into keyframes + transcript + a structured markdown digest. Fully local, $0."
 readme = "README.md"
