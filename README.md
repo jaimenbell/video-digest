@@ -208,3 +208,6 @@ MIT — see [LICENSE](LICENSE). Copyright (c) 2026 Jaimen Bell.
 Maintained by [Jaimen Bell](https://jaimenbell.dev). For custom local-first
 tooling or agent-workflow automation work, see
 [jaimenbell.dev](https://jaimenbell.dev).
+
+Also building an MCP server? The [MCP Starter Kit](https://jaimenbell.gumroad.com/l/adnojp)
+has templates, a build playbook, and packaging war-stories from shipping this one.
