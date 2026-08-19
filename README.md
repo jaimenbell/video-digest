@@ -82,6 +82,9 @@ workflow that can actually see the images).
 ## Quickstart
 
 ```bash
+pip install jaimenbell-video-digest
+
+# ...or from a source checkout:
 pip install -r requirements.txt   # yt-dlp, faster-whisper, requests, pillow, numpy
 
 # From a URL:
@@ -197,7 +200,6 @@ your machine except to be fetched from wherever you pointed `yt-dlp` at.
 - Palette k-means samples up to 20k pixels per frame and statistics up to 1M
   pixels (fixed stride, deterministic). Very fine detail below that sampling
   density can be missed.
-- No packaging/publish to PyPI yet — install from source.
 
 ## License
 
