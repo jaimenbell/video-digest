@@ -180,6 +180,78 @@ def _measure_tokens(
         return estimated_count, FALLBACK_MAX_MODEL_LEN, "chars/N-fallback", FALLBACK_CHARS_PER_TOKEN
 
 
+def _prompt_token_count(
+    prompt: str,
+    tokenize_endpoint: str,
+    model: str,
+    http_post,
+    timeout: float,
+    chars_per_token: float,
+) -> int:
+    """Real token count for ONE prompt via /tokenize, falling back to the
+    rounded-up chars estimate. Never raises."""
+    try:
+        response = http_post(
+            tokenize_endpoint, json={"model": model, "prompt": prompt}, timeout=timeout
+        )
+        response.raise_for_status()
+        return int(response.json()["count"])
+    except Exception:
+        return _tokens_for_chars(len(prompt), chars_per_token)
+
+
+def _verified_chunks(
+    chunks: list[str],
+    tokenize_endpoint: str,
+    model: str,
+    http_post,
+    timeout: float,
+    max_tokens: int,
+    max_model_len: int,
+    chars_per_token: float,
+) -> list[str]:
+    """Re-verify every packed chunk against the REAL tokenizer before it is
+    ever sent. The packer sizes chunks in characters via a global
+    chars-per-token ratio; a region denser than the transcript average (heavy
+    timestamps, code, numbers) can overflow the window anyway -- the 2026-08-29
+    production failure was exactly this: a packed chunk measured 7169 real
+    input tokens against a 7168 budget and vLLM 400'd. A chunk that measures
+    over budget is re-split using its OWN measured density (true local
+    chars-per-token), which converges in one or two passes; a piece that still
+    cannot fit is hard-sliced. Never raises; never returns an empty list for
+    non-empty input."""
+    allowed_prompt = max_model_len - max_tokens - SAFETY_MARGIN_TOKENS
+    probe_overhead = _CHUNK_PROMPT_TEMPLATE.format(index=99, total=99, transcript="")
+    verified: list[str] = []
+    queue = list(chunks)
+    guard = 0
+    while queue:
+        guard += 1
+        if guard > 256:
+            # Structural runaway stop -- accept the remainder rather than loop
+            # forever; the send path still classifies any residual overflow
+            # honestly as context-overflow.
+            verified.extend(queue)
+            break
+        chunk = queue.pop(0)
+        probe = probe_overhead + chunk
+        measured = _prompt_token_count(
+            probe, tokenize_endpoint, model, http_post, timeout, chars_per_token
+        )
+        if measured <= allowed_prompt:
+            verified.append(chunk)
+            continue
+        # True local density of THIS text, from the real measurement.
+        local_cpt = (len(probe) / measured) if measured > 0 else chars_per_token
+        retry_budget = max(MIN_CHUNK_BUDGET_TOKENS, int(allowed_prompt * 0.9))
+        pieces = _chunk_transcript(chunk, retry_budget, local_cpt)
+        if len(pieces) <= 1 and pieces and pieces[0] == chunk:
+            pieces = _hard_slice(chunk, max(1, len(chunk) // 2))
+        # Preserve order: re-verify the split pieces before later chunks.
+        queue[0:0] = pieces
+    return verified
+
+
 def _post_chat_completion(
     prompt: str,
     endpoint: str,
@@ -335,6 +407,7 @@ def _map_reduce_summarize(
     max_model_len: int,
     estimator: str,
     chars_per_token: float,
+    tokenize_endpoint: str = DEFAULT_TOKENIZE_ENDPOINT,
 ) -> SummaryResult:
     overhead_map = _tokens_for_chars(
         len(_CHUNK_PROMPT_TEMPLATE.format(index=1, total=99, transcript="")), chars_per_token
@@ -356,6 +429,10 @@ def _map_reduce_summarize(
 
     chunk_budget = max(MIN_CHUNK_BUDGET_TOKENS, available_for_chunks)
     chunks = _chunk_transcript(transcript_text, chunk_budget, chars_per_token)
+    chunks = _verified_chunks(
+        chunks, tokenize_endpoint, model, http_post, timeout,
+        max_tokens, max_model_len, chars_per_token,
+    )
 
     chunk_summaries: list[str] = []
     for i, chunk in enumerate(chunks):
@@ -371,13 +448,14 @@ def _map_reduce_summarize(
     )
     reduce_prompt = _REDUCE_PROMPT_TEMPLATE.format(total=len(chunk_summaries), parts=parts_text)
 
-    overhead_reduce = _tokens_for_chars(
-        len(_REDUCE_PROMPT_TEMPLATE.format(total=len(chunk_summaries), parts="")), chars_per_token
+    # Real measurement of the FULL reduce prompt, not a chars estimate --
+    # same density trap as the map chunks (the char ratio under-counts dense
+    # text and the reduce would 400). Compared against the full-prompt budget.
+    measured_reduce_prompt = _prompt_token_count(
+        reduce_prompt, tokenize_endpoint, model, http_post, timeout, chars_per_token
     )
-    reduce_budget = max_model_len - max_tokens - SAFETY_MARGIN_TOKENS - overhead_reduce
-    reduce_prompt_tokens = _tokens_for_chars(len(parts_text), chars_per_token)
 
-    if reduce_prompt_tokens > reduce_budget:
+    if measured_reduce_prompt > (max_model_len - max_tokens - SAFETY_MARGIN_TOKENS):
         fallback_text = _REDUCE_FALLBACK_NOTE + "\n\n" + parts_text
         return SummaryResult(
             text=fallback_text, error=None, estimator=estimator, chunked=True, reduce_fallback=True
@@ -436,4 +514,5 @@ def summarize_with_vllm(
         max_model_len,
         estimator,
         chars_per_token,
+        tokenize_endpoint=tokenize_endpoint,
     )

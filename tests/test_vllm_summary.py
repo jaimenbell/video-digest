@@ -452,3 +452,71 @@ class TestChunkTranscriptBoundaries:
         reassembled = "\n\n".join(chunks)
         for i in range(10):
             assert f"Paragraph {i}" in reassembled
+
+
+class TestPerChunkVerificationAgainstVariableDensity:
+    """Regression for the 2026-08-29 PRODUCTION failure: a real 60-minute
+    transcript calibrated at one global chars-per-token ratio, but one packed
+    chunk's region was denser than the average and measured 7169 real input
+    tokens against a 7168 budget -- vLLM 400'd and the digest shipped the TODO
+    placeholder. The uniform-ratio `_strict_server` above cannot catch this
+    (its calibration and its enforcement always agree); this server counts
+    DIGITS as a full token each, so digit-dense regions are ~4x denser than
+    the whole-transcript average and blind char-packing overflows. The fix
+    (`_verified_chunks`) re-measures every packed chunk against /tokenize
+    before sending and re-splits on overflow using the chunk's own measured
+    density."""
+
+    @staticmethod
+    def _variable_density_server(max_model_len: int) -> MagicMock:
+        def _count(text: str) -> int:
+            digits = sum(c.isdigit() for c in text)
+            others = len(text) - digits
+            return max(1, digits + round(others / 4.0))
+
+        def _post(url, json=None, timeout=None):
+            if url == DEFAULT_TOKENIZE_ENDPOINT:
+                return _tokenize_response(_count(json["prompt"]), max_model_len)
+            prompt_text = json["messages"][0]["content"]
+            requested_max_tokens = json.get("max_tokens", 0)
+            if _count(prompt_text) + requested_max_tokens > max_model_len:
+                return _http_error_response(
+                    400, f"This model's maximum context length is {max_model_len} tokens"
+                )
+            return _completion_response("A realistic chunk summary of a few sentences.")
+
+        return MagicMock(side_effect=_post)
+
+    def test_dense_region_no_longer_overflows_the_window(self):
+        # Sparse prose start, digit-dense middle (4x the average density),
+        # sparse end -- the shape that beat the global calibration in prod.
+        sparse = "\n\n".join("plain spoken words here " * 40 for _ in range(6))
+        dense = "\n\n".join("12345678 " * 200 for _ in range(6))
+        transcript = sparse + "\n\n" + dense + "\n\n" + sparse
+
+        fake_post = self._variable_density_server(max_model_len=2048)
+        result = summarize_with_vllm(transcript, http_post=fake_post, max_tokens=256)
+
+        assert result.error is None, f"per-chunk verification failed: {result.error}"
+        assert result.chunked is True
+        assert result.text
+
+    def test_every_completion_request_actually_fit(self):
+        sparse = "\n\n".join("plain spoken words here " * 40 for _ in range(6))
+        dense = "\n\n".join("12345678 " * 200 for _ in range(6))
+        transcript = sparse + "\n\n" + dense + "\n\n" + sparse
+
+        fake_post = self._variable_density_server(max_model_len=2048)
+        summarize_with_vllm(transcript, http_post=fake_post, max_tokens=256)
+
+        def _count(text: str) -> int:
+            digits = sum(c.isdigit() for c in text)
+            return max(1, digits + round((len(text) - digits) / 4.0))
+
+        completion_calls = [
+            c for c in fake_post.call_args_list if c.args[0] != DEFAULT_TOKENIZE_ENDPOINT
+        ]
+        assert completion_calls, "no completion requests were ever sent"
+        for c in completion_calls:
+            prompt_text = c.kwargs["json"]["messages"][0]["content"]
+            assert _count(prompt_text) + 256 <= 2048
