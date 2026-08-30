@@ -7,11 +7,13 @@ chat/completions call, so `http_post` fakes below distinguish the two by URL
 
 from unittest.mock import MagicMock
 
+import pytest
 import requests
 
 from video_digest.vllm_summary import (
     DEFAULT_TOKENIZE_ENDPOINT,
     SummaryResult,
+    _chunk_transcript,
     summarize_with_vllm,
 )
 
@@ -31,6 +33,19 @@ def _tokenize_response(count: int, max_model_len: int) -> MagicMock:
     response.raise_for_status.return_value = None
     response.json.return_value = {"count": count, "max_model_len": max_model_len}
     return response
+
+
+def _calibrated_tokenize_response(
+    text: str, max_model_len: int, chars_per_token: float = 3.0
+) -> MagicMock:
+    """A tokenize response whose `count` is realistically derived from the
+    actual text length at `chars_per_token`, instead of an arbitrary made-up
+    number -- so the resulting chars_per_token the code derives (len/count)
+    is realistic too, and chunk-packing math in these tests behaves like it
+    would against the real server (measured ~2.97 chars/token on a real
+    whisper-format transcript)."""
+    count = max(1, round(len(text) / chars_per_token))
+    return _tokenize_response(count, max_model_len)
 
 
 def _completion_response(content: str) -> MagicMock:
@@ -55,6 +70,34 @@ def _routed_post(tokenize_response, non_tokenize_response_or_fn):
         ):
             return non_tokenize_response_or_fn(url, json, timeout)
         return non_tokenize_response_or_fn
+
+    return MagicMock(side_effect=_post)
+
+
+def _strict_server(max_model_len: int, chars_per_token: float = 2.97) -> MagicMock:
+    """Mimics the real vLLM server closely enough to catch a chunk-packing
+    miscalibration: /tokenize reports counts derived from `chars_per_token`,
+    and chat/completions 400s with a context-overflow body whenever a
+    request's estimated prompt tokens + max_tokens would exceed
+    max_model_len -- exactly what a real server does. Unlike the other fakes
+    in this file (which always succeed), this one actually ENFORCES the
+    budget, so it is the positive control for the packer's math: it fires on
+    a mis-packed chunk and stays silent on a correctly-packed one."""
+
+    def _post(url, json=None, timeout=None):
+        if url == DEFAULT_TOKENIZE_ENDPOINT:
+            prompt_text = json["prompt"]
+            count = max(1, round(len(prompt_text) / chars_per_token))
+            return _tokenize_response(count, max_model_len)
+
+        prompt_text = json["messages"][0]["content"]
+        requested_max_tokens = json.get("max_tokens", 0)
+        prompt_tokens = max(1, round(len(prompt_text) / chars_per_token))
+        if prompt_tokens + requested_max_tokens > max_model_len:
+            return _http_error_response(
+                400, f"This model's maximum context length is {max_model_len} tokens"
+            )
+        return _completion_response("A realistic chunk summary of a few sentences.")
 
     return MagicMock(side_effect=_post)
 
@@ -155,6 +198,18 @@ class TestSummarizeWithVllmSingleShot:
         assert result.text is None
         assert result.error.startswith("parse-error:")
 
+    def test_unexpected_non_requests_exception_never_propagates(self):
+        # The documented contract is "never raises". A buggy injected http_post
+        # that raises something other than a requests exception must still be
+        # classified, not left to blow up the pipeline after transcription.
+        fake_post = _routed_post(
+            _tokenize_response(50, 8192),
+            lambda url, json, timeout: (_ for _ in ()).throw(ValueError("caller bug")),
+        )
+        result = summarize_with_vllm("transcript text", http_post=fake_post)
+        assert result.text is None
+        assert result.error.startswith("unexpected-error:")
+
     def test_each_failure_mode_produces_a_distinct_message(self):
         # Regression guard: overflow / connection / timeout / parse must never
         # collapse back into the same opaque bare-except None again.
@@ -211,7 +266,7 @@ class TestTokenizePrecheck:
         assert tokenize_call[1]["prompt"] == "transcript body"
         assert tokenize_call[1]["model"] == "qwen3-14b"
 
-    def test_falls_back_to_chars4_estimator_when_tokenize_unreachable(self):
+    def test_falls_back_to_conservative_estimator_when_tokenize_unreachable(self):
         def fake_post_fn(url, json=None, timeout=None):
             if url == DEFAULT_TOKENIZE_ENDPOINT:
                 raise ConnectionError("tokenize down")
@@ -220,7 +275,7 @@ class TestTokenizePrecheck:
         fake_post = MagicMock(side_effect=fake_post_fn)
         result = summarize_with_vllm("short transcript text", http_post=fake_post)
 
-        assert result.estimator == "chars/4-fallback"
+        assert result.estimator == "chars/N-fallback"
         assert result.error is None
         assert result.text == "ok"
 
@@ -244,7 +299,7 @@ class TestChunkedMapReduce:
 
         def fake_post_fn(url, json=None, timeout=None):
             if url == DEFAULT_TOKENIZE_ENDPOINT:
-                return _tokenize_response(50000, 500)
+                return _calibrated_tokenize_response(transcript, max_model_len=500)
             return _completion_response("A short partial summary.")
 
         fake_post = MagicMock(side_effect=fake_post_fn)
@@ -263,7 +318,7 @@ class TestChunkedMapReduce:
 
         def fake_post_fn(url, json=None, timeout=None):
             if url == DEFAULT_TOKENIZE_ENDPOINT:
-                return _tokenize_response(100000, 300)
+                return _calibrated_tokenize_response(transcript, max_model_len=700)
             return _completion_response(long_chunk_summary)
 
         fake_post = MagicMock(side_effect=fake_post_fn)
@@ -278,12 +333,10 @@ class TestChunkedMapReduce:
 
     def test_map_chunk_failure_is_reported_with_chunk_position(self):
         transcript = self._long_transcript()
-        call_count = {"n": 0}
 
         def fake_post_fn(url, json=None, timeout=None):
             if url == DEFAULT_TOKENIZE_ENDPOINT:
-                return _tokenize_response(50000, 500)
-            call_count["n"] += 1
+                return _calibrated_tokenize_response(transcript, max_model_len=500)
             raise requests.exceptions.Timeout("slow chunk")
 
         fake_post = MagicMock(side_effect=fake_post_fn)
@@ -305,7 +358,7 @@ class TestChunkedMapReduce:
 
         def fake_post_fn(url, json=None, timeout=None):
             if url == DEFAULT_TOKENIZE_ENDPOINT:
-                return _tokenize_response(200000, 8192)
+                return _calibrated_tokenize_response(transcript, max_model_len=8192)
             return _completion_response("A concise partial summary.")
 
         fake_post = MagicMock(side_effect=fake_post_fn)
@@ -315,3 +368,87 @@ class TestChunkedMapReduce:
         assert result.chunked is True
         assert result.text is not None
         assert result.error is None
+
+    def test_config_too_small_for_even_one_chunk_fails_explicitly_without_doomed_requests(self):
+        # max_model_len - max_tokens - SAFETY_MARGIN_TOKENS(32) leaves far less
+        # than MIN_CHUNK_BUDGET_TOKENS(256) room for a chunk: this configuration
+        # cannot possibly work, so it must fail fast with an explicit reason
+        # instead of firing off chunk requests that are doomed to 400.
+        transcript = self._long_transcript()
+
+        def fake_post_fn(url, json=None, timeout=None):
+            if url == DEFAULT_TOKENIZE_ENDPOINT:
+                return _calibrated_tokenize_response(transcript, max_model_len=300)
+            pytest.fail("a chat/completions request should never be sent in this configuration")
+
+        fake_post = MagicMock(side_effect=fake_post_fn)
+        result = summarize_with_vllm(transcript, http_post=fake_post, max_tokens=200)
+
+        assert result.text is None
+        assert result.chunked is True
+        assert result.error.startswith("context-overflow:")
+        assert "leaves no room" in result.error
+        assert fake_post.call_count == 1  # only the /tokenize precheck, no doomed chunk POSTs
+
+
+class TestChunkBudgetHonoursRealTokenizer:
+    """Positive control for the chunk packer's token-budget math: `_strict_server`
+    actually rejects (400) any request that doesn't fit, mimicking the real
+    server, instead of unconditionally succeeding like the other fakes in this
+    file. It fires on a mis-packed chunk and stays silent on a correctly
+    packed one -- this is what caught the chars/4-vs-real-tokenizer mismatch
+    (measured ~2.97 chars/token on a real whisper-format transcript, not the
+    textbook-English ~4) that let every map chunk overflow before this fix."""
+
+    def test_chunked_requests_never_exceed_the_real_context_window(self):
+        # A whisper-format transcript: dense [MM:SS - MM:SS] timestamps.
+        transcript = "\n\n".join(
+            f"[{i:02d}:00 - {i:02d}:05] " + ("word " * 120) for i in range(40)
+        )
+        fake_post = _strict_server(max_model_len=8192, chars_per_token=2.97)
+
+        result = summarize_with_vllm(transcript, http_post=fake_post, max_tokens=1024)
+
+        assert result.error is None, f"a request overflowed the real budget: {result.error}"
+        assert result.chunked is True
+        assert result.text is not None
+
+    def test_single_shot_also_honours_the_real_context_window(self):
+        # A transcript short enough to stay single-shot must also respect the
+        # real budget the strict server enforces.
+        transcript = f"[00:00 - 00:05] " + ("word " * 50)
+        fake_post = _strict_server(max_model_len=8192, chars_per_token=2.97)
+
+        result = summarize_with_vllm(transcript, http_post=fake_post, max_tokens=1024)
+
+        assert result.error is None
+        assert result.chunked is False
+        assert result.text is not None
+
+
+class TestChunkTranscriptBoundaries:
+    """White-box tests for the paragraph/line/hard-slice packer itself."""
+
+    def test_no_produced_chunk_exceeds_its_character_budget(self):
+        budget_tokens = 50
+        chars_per_token = 2.0
+        budget_chars = int(budget_tokens * chars_per_token)
+
+        paragraph = "short line one\n" + ("x" * 500) + "\nshort line two"
+        chunks = _chunk_transcript(paragraph, budget_tokens, chars_per_token)
+
+        assert chunks
+        for chunk in chunks:
+            assert len(chunk) <= budget_chars, (
+                f"chunk of {len(chunk)} chars exceeds the {budget_chars}-char budget "
+                "-- an oversized single line was not hard-sliced"
+            )
+
+    def test_all_original_text_is_preserved_across_chunks(self):
+        # No dropped text: every non-whitespace token from the source appears
+        # somewhere in the reassembled chunks.
+        text = "\n\n".join(f"Paragraph {i} with some words here." for i in range(10))
+        chunks = _chunk_transcript(text, budget_tokens=20, chars_per_token=3.0)
+        reassembled = "\n\n".join(chunks)
+        for i in range(10):
+            assert f"Paragraph {i}" in reassembled

@@ -148,7 +148,7 @@ pip install pytest
 pytest
 ```
 
-140 tests, 140 passing (re-verified fresh, `pytest --junitxml`). Every
+146 tests, 146 passing (re-verified fresh, `pytest --junitxml`). Every
 subprocess call (`yt-dlp`, `ffmpeg`, `ffprobe`) and every model/HTTP call
 (`faster-whisper`'s `WhisperModel`, the local vLLM `/tokenize` +
 `chat/completions` requests) is dependency-injected behind a
@@ -207,20 +207,33 @@ your machine except to be fetched from wherever you pointed `yt-dlp` at.
   summarized independently (map), then combined into one final summary
   (reduce). If even the combined per-chunk summaries don't fit the context
   window, they are concatenated mechanically instead of reduced further, and
-  the digest says so rather than silently truncating. If `/tokenize` itself
-  is unreachable, token counts fall back to a chars/4 estimate against a
-  known `FALLBACK_MAX_MODEL_LEN` (8192) -- `SummaryResult.estimator` always
-  records which estimator actually ran.
+  the digest says so rather than silently truncating.
+  Chunk packing needs to know how many characters make up one token for the
+  *specific* transcript being chunked -- a fixed ratio is wrong in practice: a
+  whisper-format transcript (`[MM:SS - MM:SS]` timestamps everywhere)
+  tokenizes far more densely than prose (measured ~3 chars/token against the
+  real server, not the textbook-English ~4). So whenever `/tokenize` answers,
+  the real ratio is derived from that exact response
+  (`len(transcript) / token_count`) and used to size chunks. Only when
+  `/tokenize` itself is unreachable does it fall back to a conservative fixed
+  ratio (2.5 chars/token, deliberately pessimistic so it over-counts rather
+  than under-counts tokens) against a known `FALLBACK_MAX_MODEL_LEN` (8192).
+  `SummaryResult.estimator` always records which mode actually ran
+  (`tokenize-endpoint` or `chars/N-fallback`). If the configuration itself
+  can't fit even one minimal chunk (e.g. `max_tokens` too close to
+  `max_model_len`), it fails fast with an explicit `context-overflow` message
+  instead of sending chunk requests that are doomed to 400.
 - **Honest, typed failure messages.** A failed vLLM call never silently
-  produces the `TODO` placeholder with no explanation. It logs one of five
+  produces the `TODO` placeholder with no explanation. It logs one of six
   distinct `stderr` messages and the CLI prints the same reason --
   `context-overflow: ...` (didn't fit even after chunking, or the server
   rejected it directly), `connection: ...` (server unreachable), `timeout: ...`
   (request exceeded its 90s per-request timeout), `http-error: ...` (some
-  other non-2xx status), or `parse-error: ...` (response body wasn't the
-  expected shape). Overflow, a down server, a slow request, and a malformed
-  response used to all collapse into the same opaque `None` -- they no longer
-  do.
+  other non-2xx status), `parse-error: ...` (response body wasn't the
+  expected shape), or `unexpected-error: ...` (anything else, e.g. a bug in an
+  injected HTTP client -- this call is documented as never raising). Overflow,
+  a down server, a slow request, and a malformed response used to all
+  collapse into the same opaque `None` -- they no longer do.
 - `faster-whisper` model download/inference speed and accuracy depend on the
   `--model` size you pick (`tiny`..`large-v3`) and your CPU/GPU.
 - Scene-change keyframe detection is a heuristic (ffmpeg's `scene` filter +

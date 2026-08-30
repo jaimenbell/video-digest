@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jaimenbell-video-digest"
-version = "0.1.0"
+version = "0.2.0"
 description = "Turn a video (URL or local mp4) into keyframes + transcript + a structured markdown digest. Fully local, $0."
 readme = "README.md"
 license = { file = "LICENSE" }
