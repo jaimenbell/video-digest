@@ -7,6 +7,7 @@ import pytest
 
 from video_digest.cli import build_arg_parser, run_pipeline, slugify, title_from_source
 from video_digest.visual import FrameVisual, VideoVisual
+from video_digest.vllm_summary import SummaryResult
 
 
 class TestSlugify:
@@ -81,7 +82,9 @@ class TestRunPipelineFullyMocked:
         )
         extract_audio_fn = MagicMock(return_value=tmp_path / "scratch" / "audio.wav")
         transcribe_fn = MagicMock(return_value="[00:00 - 00:05] mocked transcript")
-        summarize_fn = MagicMock(return_value="mocked mechanical summary")
+        summarize_fn = MagicMock(
+            return_value=SummaryResult(text="mocked mechanical summary", error=None)
+        )
 
         return dict(
             acquire_fn=acquire_fn,
@@ -149,6 +152,26 @@ class TestRunPipelineFullyMocked:
             **fakes,
         )
         fakes["summarize_fn"].assert_not_called()
+
+    def test_prints_distinct_failure_reason_when_vllm_summary_fails(self, tmp_path, capsys):
+        fakes = self._fakes(tmp_path)
+        fakes["summarize_fn"] = MagicMock(
+            return_value=SummaryResult(
+                text=None, error="context-overflow: too long for context window"
+            )
+        )
+
+        digest_path = run_pipeline(
+            source="clip.mp4",
+            output_dir=tmp_path / "digests",
+            scratch_dir=tmp_path / "scratch",
+            **fakes,
+        )
+
+        captured = capsys.readouterr()
+        assert "context-overflow: too long for context window" in captured.err
+        content = digest_path.read_text(encoding="utf-8")
+        assert "TODO: fill in after reviewing" in content
 
     def test_visual_analysis_runs_over_the_extracted_frames(self, tmp_path):
         fakes = self._fakes(tmp_path)

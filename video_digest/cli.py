@@ -97,7 +97,13 @@ def run_pipeline(
 
     summary_text = None
     if use_vllm_summary:
-        summary_text = summarize_fn(transcript_text)
+        summary_result = summarize_fn(transcript_text)
+        summary_text = summary_result.text if summary_result is not None else None
+        if summary_result is not None and summary_result.error:
+            print(
+                f"vLLM summary skipped, leaving TODO placeholder: {summary_result.error}",
+                file=sys.stderr,
+            )
 
     frame_visuals = None
     visual_rollup = None
