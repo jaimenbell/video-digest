@@ -114,9 +114,13 @@ python -m video_digest <url-or-path> \
   `TODO` placeholder in the Summary section instead. By default, if a local
   vLLM server is reachable at `http://localhost:8000`, its `qwen3-14b` model is
   asked for a mechanical, text-only first-pass summary of the transcript
-  (vLLM never sees the keyframe images — that part is Claude/human-only). If
-  the server isn't reachable, the pipeline falls back to the placeholder
-  automatically — this is never a hard dependency.
+  (vLLM never sees the keyframe images — that part is Claude/human-only). The
+  transcript is measured against the server's own context window first
+  (`/tokenize`) and, if it doesn't fit in one request, is automatically
+  chunked and map-reduced -- see [Limitations](#limitations) for the details
+  and failure-mode messages. If the server isn't reachable, the pipeline
+  falls back to the placeholder automatically -- this is never a hard
+  dependency.
 - `--no-visual` — skip the deterministic keyframe colour analysis and leave the
   per-frame `TODO` placeholders instead. The analysis runs by default: it is
   local, model-free, and costs nothing but a second or two of CPU.
@@ -144,9 +148,10 @@ pip install pytest
 pytest
 ```
 
-126 tests, 126 passing (re-verified fresh). Every subprocess call
-(`yt-dlp`, `ffmpeg`, `ffprobe`) and every model/HTTP call (`faster-whisper`'s
-`WhisperModel`, the local vLLM request) is dependency-injected behind a
+140 tests, 140 passing (re-verified fresh, `pytest --junitxml`). Every
+subprocess call (`yt-dlp`, `ffmpeg`, `ffprobe`) and every model/HTTP call
+(`faster-whisper`'s `WhisperModel`, the local vLLM `/tokenize` +
+`chat/completions` requests) is dependency-injected behind a
 `runner=subprocess.run` / `model_factory=` / `http_post=` default argument.
 The test suite mocks all of these — it never invokes a real binary, loads a
 real Whisper model, or makes a real network request. The keyframe colour tests
@@ -189,6 +194,33 @@ your machine except to be fetched from wherever you pointed `yt-dlp` at.
   (or OpenAI-compatible) server running at the configured endpoint — this
   repo doesn't set one up for you, and the pipeline works fine without it
   (falls back to a `TODO` placeholder).
+- **vLLM context window + chunking.** This deployment serves `qwen3-14b` with
+  `--max-model-len 8192`, so a single `chat/completions` request can't hold an
+  arbitrarily long transcript plus its answer. Before summarizing,
+  `vllm_summary.py` asks the server's own `/tokenize` endpoint (a plain vLLM
+  extra endpoint -- note this is `/tokenize`, **not** `/v1/tokenize`, which
+  404s) how many tokens the transcript is and what the server's real
+  `max_model_len` is, and budgets off that live number rather than a
+  hardcoded constant. A transcript that fits is summarized in one request, as
+  before. One that doesn't (roughly 20-30+ minutes of dense speech) is split
+  on paragraph/line boundaries into chunks that each fit the budget,
+  summarized independently (map), then combined into one final summary
+  (reduce). If even the combined per-chunk summaries don't fit the context
+  window, they are concatenated mechanically instead of reduced further, and
+  the digest says so rather than silently truncating. If `/tokenize` itself
+  is unreachable, token counts fall back to a chars/4 estimate against a
+  known `FALLBACK_MAX_MODEL_LEN` (8192) -- `SummaryResult.estimator` always
+  records which estimator actually ran.
+- **Honest, typed failure messages.** A failed vLLM call never silently
+  produces the `TODO` placeholder with no explanation. It logs one of five
+  distinct `stderr` messages and the CLI prints the same reason --
+  `context-overflow: ...` (didn't fit even after chunking, or the server
+  rejected it directly), `connection: ...` (server unreachable), `timeout: ...`
+  (request exceeded its 90s per-request timeout), `http-error: ...` (some
+  other non-2xx status), or `parse-error: ...` (response body wasn't the
+  expected shape). Overflow, a down server, a slow request, and a malformed
+  response used to all collapse into the same opaque `None` -- they no longer
+  do.
 - `faster-whisper` model download/inference speed and accuracy depend on the
   `--model` size you pick (`tiny`..`large-v3`) and your CPU/GPU.
 - Scene-change keyframe detection is a heuristic (ffmpeg's `scene` filter +
