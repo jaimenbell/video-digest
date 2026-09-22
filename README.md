@@ -148,7 +148,7 @@ pip install pytest
 pytest
 ```
 
-146 tests, 146 passing (re-verified fresh, `pytest --junitxml`). Every
+148 tests, 148 passing (re-verified fresh, `pytest --junitxml`, 2026-09-21). Every
 subprocess call (`yt-dlp`, `ffmpeg`, `ffprobe`) and every model/HTTP call
 (`faster-whisper`'s `WhisperModel`, the local vLLM `/tokenize` +
 `chat/completions` requests) is dependency-injected behind a
